@@ -1,0 +1,159 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Heartbeat freshness per cohort",
+      "description": "Per 1-minute bucket: distinct clients that sent a heartbeat / distinct clients heard from. The exact 60-second freshness ratio is the Prometheus gauge fleetpulse_heartbeat_freshness_ratio; this panel is the same events, sliced through ClickHouse.",
+      "type": "timeseries",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "timeseries",
+          "rawSql": "SELECT\n  $__timeGroup(ts, '1m') AS time,\n  cohort,\n  uniqExactIf(client_id, type = 'heartbeat') / uniqExact(client_id) AS freshness\nFROM fleetpulse.events\nWHERE $__timeFilter(ts)\nGROUP BY time, cohort\nORDER BY time",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Capture completeness per cohort (mean over sessions)",
+      "description": "Mean over sessions of distinct sequence numbers received / expected_event_count, read from the session_capture_progress materialized view. Mirrors fleetpulse_capture_completeness_ratio.",
+      "type": "timeseries",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "timeseries",
+          "rawSql": "SELECT\n  toStartOfMinute(last_seen) AS time,\n  cohort,\n  avg(least(received / nullIf(expected, 0), 1.0)) AS completeness\nFROM\n(\n  SELECT\n    cohort,\n    session_id,\n    uniqExactMerge(sequences) AS received,\n    maxMerge(expected_events) AS expected,\n    maxMerge(last_seen) AS last_seen\n  FROM fleetpulse.session_capture_progress\n  GROUP BY cohort, session_id\n)\nGROUP BY time, cohort\nORDER BY time",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Mapping availability (downstream dependency)",
+      "description": "Trailing-window success ratio of capture-enrichment calls to the Workflow Mapping stub, written by the worker to mapping_results. Not derived from fleet events; see docs/signals.md.",
+      "type": "timeseries",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "timeseries",
+          "rawSql": "SELECT\n  $__timeGroup(ts, '1m') AS time,\n  countIf(success = 1) / count() AS availability\nFROM fleetpulse.mapping_results\nWHERE $__timeFilter(ts)\nGROUP BY time\nORDER BY time",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Dark cohort heartbeat volume (${version})",
+      "description": "Heartbeats per minute for the version selected in the dashboard variable. WITH FILL STEP 60 emits explicit zero rows, so a cohort that goes silent shows a line dropping to 0 rather than a gap.",
+      "type": "timeseries",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "timeseries",
+          "rawSql": "SELECT\n  $__timeGroup(ts, '1m') AS time,\n  count() AS heartbeats\nFROM fleetpulse.events\nWHERE type = 'heartbeat' AND version = '${version}' AND $__timeFilter(ts)\nGROUP BY time\nORDER BY time WITH FILL STEP 60",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "2.6.0-beta goes dark (hardcoded demo cohort)",
+      "description": "The runbook scenario pinned to 2.6.0-beta so it is visible even when the dashboard variable points elsewhere. Start the simulator with --kill-cohort=2.6.0-beta and this panel drops to zero about two minutes in.",
+      "type": "timeseries",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "timeseries",
+          "rawSql": "SELECT\n  $__timeGroup(ts, '1m') AS time,\n  count() AS heartbeats\nFROM fleetpulse.events\nWHERE type = 'heartbeat' AND version = '2.6.0-beta' AND $__timeFilter(ts)\nGROUP BY time\nORDER BY time WITH FILL STEP 60",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Freshness now vs 5 minutes ago",
+      "description": "Per-cohort comparison used in the runbook: freshness_now uses the trailing 60 seconds, freshness_5m_ago uses [now-6m, now-5m). A silent cohort's now column collapses to 0 while the 5m-ago column stays healthy.",
+      "type": "table",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+          "editorType": "sql",
+          "format": 2,
+          "queryType": "table",
+          "rawSql": "SELECT\n  cohort,\n  uniqExactIf(client_id, type = 'heartbeat' AND ts >= now() - INTERVAL 60 SECOND) / uniqExact(client_id) AS freshness_now,\n  uniqExactIf(client_id, type = 'heartbeat' AND ts >= now() - INTERVAL 360 SECOND AND ts < now() - INTERVAL 300 SECOND) / uniqExact(client_id) AS freshness_5m_ago\nFROM fleetpulse.events\nWHERE ts >= now() - INTERVAL 30 MINUTE\nGROUP BY cohort\nORDER BY cohort",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["fleetpulse", "clickhouse"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": true, "text": "2.6.0-beta", "value": "2.6.0-beta" },
+        "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+        "definition": "SELECT DISTINCT version FROM fleetpulse.events ORDER BY version",
+        "includeAll": false,
+        "label": "version",
+        "multi": false,
+        "name": "version",
+        "options": [],
+        "query": "SELECT DISTINCT version FROM fleetpulse.events ORDER BY version",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "FleetPulse (ClickHouse)",
+  "uid": "fleetpulse-clickhouse",
+  "version": 1,
+  "weekStart": ""
+}

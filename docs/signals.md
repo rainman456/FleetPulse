@@ -188,3 +188,43 @@ in stopping at three well-justified signals with real thresholds, rather
 than producing a sprawling list of metrics with no stated target and no
 reasoning for the window chosen. `docs/roadmap.md` names the next signal
 that would be worth adding and why it isn't in this initial three.
+
+---
+
+## ClickHouse implementation (optional backend)
+
+With `FLEETPULSE_SINK_BACKEND=clickhouse` the worker writes every processed
+event into `fleetpulse.events` (heartbeats additionally into
+`fleetpulse.heartbeats`) and every enrichment call outcome into
+`fleetpulse.mapping_results` (batched inserts, 500 rows / 1s flush, retry
+with backoff). The signals computer's state reads (`All`/`Get`) are then
+served by SQL over that event log instead of the in-memory store, so the
+same Prometheus gauges are computed from ClickHouse data.
+
+What is SQL-backed vs. in-process:
+
+| Signal | Source when ClickHouse is on | Where |
+|---|---|---|
+| heartbeat freshness | SQL over `events` (`internal/clickhouse/queries.go`: `QueryFreshnessByCohort`) | `uniqExactIf(client_id, heartbeat in trailing 60s) / uniqExact(client_id)` over a trailing 10-minute scan |
+| capture completeness | SQL over the `session_capture_progress` materialized view (`QueryCompletenessByCohort`) | per-session `uniqExactState(sequence_number)` / `maxState(expected_event_count)`, averaged per cohort with the same `min(..., 1.0)` cap as the Go path |
+| mapping availability | SQL over `mapping_results` (`QueryMappingAvailability`) | trailing 5-minute `countIf(success = 1) / count()`; empty window still reports `1.0`, matching the Go tracker |
+
+Materialized views (all idempotent, applied by `make ch-migrate`):
+
+- `cohort_last_seen` + `cohort_last_seen_mv` -- per (cohort, client_id)
+  `argMax`-states for version/os/region and `max`/`maxIf` states for
+  last-event / last-heartbeat timestamps.
+- `session_capture_progress` + `session_capture_progress_mv` -- per
+  (cohort, session_id) `uniqExact` state over sequence numbers (so queue
+  redelivery cannot inflate completeness) and `max` state over
+  `expected_event_count`.
+
+**One deliberate caveat:** the in-process mapping tracker
+(`internal/signals/mapping.go`) remains the source that feeds
+`fleetpulse_mapping_availability_ratio` in the Prometheus dashboard. The
+ClickHouse `mapping_results` table holds the same outcomes and powers the
+SQL/Grafana-ClickHouse view of the signal, but the Go computer does not
+read the table back. Deriving the metric from ClickHouse at runtime would
+add a query to the hot tick path for a signal that is fundamentally a
+downstream probe, not fleet data; the tradeoff is recorded in
+`docs/adr/0001-clickhouse-as-optional-signal-store.md`.

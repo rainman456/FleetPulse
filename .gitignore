@@ -11,7 +11,8 @@
 
 # Go tooling
 /vendor/
-go.sum
+# go.sum is intentionally NOT ignored: dependency lockfiles must be
+# committed for reproducible CI builds (see docs/verify.md).
 
 # Environment / local overrides
 .env
@@ -31,6 +32,15 @@ Thumbs.db
 # LocalStack / docker-compose volumes
 .localstack/
 docker/volumes/
+
+# Terraform (infra/terraform/aws)
+**/.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+*.tfvars
+!*.tfvars.example
+# .terraform.lock.hcl is intentionally committed (provider checksum pinning).
 
 # Logs
 *.log

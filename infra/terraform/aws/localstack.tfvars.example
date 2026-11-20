@@ -1,0 +1,10 @@
+# LocalStack mode. Copy to localstack.tfvars and edit; never commit real
+# credentials. access_key/secret_key are omitted on purpose: the module falls
+# back to LocalStack's conventional dummy value "test" when use_localstack is
+# true, and ignores them entirely in real-AWS mode.
+
+region              = "us-east-1"
+name_prefix         = "fleetpulse"
+tags                = {}
+use_localstack      = true
+localstack_endpoint = "http://localhost:4566"

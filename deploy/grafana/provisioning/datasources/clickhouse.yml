@@ -1,0 +1,21 @@
+# Auto-provisions the ClickHouse datasource (grafana-clickhouse-datasource
+# plugin, pinned via GF_INSTALL_PLUGINS in docker-compose.yml). The dashboard
+# references it by uid "clickhouse". NOT run/verified as part of this
+# scaffold.
+apiVersion: 1
+
+datasources:
+  - name: ClickHouse
+    type: grafana-clickhouse-datasource
+    uid: clickhouse
+    access: proxy
+    isDefault: false
+    editable: true
+    jsonData:
+      host: clickhouse
+      port: 8123
+      protocol: http
+      username: default
+      defaultDatabase: fleetpulse
+    secureJsonData:
+      password: ""

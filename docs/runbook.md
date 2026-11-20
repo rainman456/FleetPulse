@@ -120,3 +120,94 @@ identifiable version's fleet went completely dark," which is both more
 alarming and dramatically easier to act on. Any future signal added to this
 catalog should default to per-cohort labeling unless there's a specific
 reason not to.
+
+---
+
+## Tracing the dark cohort in ClickHouse
+
+The steps above use the Prometheus dashboard and the in-process state. If
+`FLEETPULSE_SINK_BACKEND=clickhouse` is on, the same questions can be asked
+directly of the event log -- which is how you would interrogate history
+that Prometheus has already aged out of its retention window. All queries
+below are copy-pasteable into `docker compose exec clickhouse clickhouse-client`
+and match the constants in `internal/clickhouse/queries.go`.
+
+**Step A -- is the cohort really dark, or just quiet?** Freshness per
+cohort, now and five minutes ago (the version must appear at all; an empty
+result for `2.6.0-beta` in the recent window while other cohorts show 1.0
+is itself the answer):
+
+```sql
+SELECT cohort,
+       uniqExactIf(client_id, type = 'heartbeat' AND ts >= now() - INTERVAL 60 SECOND)
+         / uniqExact(client_id) AS freshness
+FROM events
+WHERE ts >= now() - INTERVAL 10 MINUTE
+GROUP BY cohort
+ORDER BY cohort;
+```
+
+**Step B -- did ingestion reject the traffic, or did it never arrive?** The
+same cross-check as runbook step 2, but against the event log: compare the
+per-type event rate for the cohort before and after the kill time. A cliff
+in heartbeat volume with no matching spike in rejects (which never reach
+ClickHouse anyway -- validation happens before the sink) means the clients
+stopped sending, not that the pipeline dropped them:
+
+```sql
+SELECT toStartOfMinute(ts) AS minute, type, count() AS events
+FROM events
+WHERE version = '2.6.0-beta'
+  AND ts >= now() - INTERVAL 15 MINUTE
+GROUP BY minute, type
+ORDER BY minute;
+```
+
+**Step C -- per-client last activity.** Which clients in the cohort went
+silent at exactly the same instant (a kill switch) versus trailing off
+gradually (a crash loop)? This uses the `cohort_last_seen` materialized
+view:
+
+```sql
+SELECT client_id, maxIfMerge(last_heartbeat_at) AS last_heartbeat_at
+FROM cohort_last_seen
+WHERE cohort = '2.6.0-beta/Linux/x64'
+GROUP BY client_id
+ORDER BY last_heartbeat_at DESC
+LIMIT 20;
+```
+
+(Adjust the cohort string to the version/os/region slice you killed --
+`cohort` is `version/os/region`, as in `internal/simulator/cohort.go`.)
+
+**Step D -- completeness at the moment the cohort died.** Sessions that
+were in flight when the clients went silent will show
+`received < expected` forever; that residual incompleteness is the data the
+fleet never got to send:
+
+```sql
+SELECT session_id,
+       uniqExactMerge(sequences)  AS received,
+       maxMerge(expected_events)  AS expected
+FROM session_capture_progress
+WHERE cohort LIKE '2.6.0-beta/%'
+GROUP BY session_id
+HAVING received < expected
+ORDER BY expected - received DESC;
+```
+
+**Step E -- downstream sanity.** If mapping availability (from
+`mapping_results`) is unchanged, the Workflow Mapping dependency was healthy
+at the time, which rules out a downstream outage as the cause and keeps the
+focus on the silent cohort itself:
+
+```sql
+SELECT if(count() = 0, 1.0, countIf(success = 1) / count()) AS mapping_availability
+FROM mapping_results
+WHERE ts >= now() - INTERVAL 5 MINUTE;
+```
+
+The diagnostic chain is the same as the Prometheus-based steps 1-4 above:
+freshness first (is it dark?), then ingestion counters (did we drop it?),
+then per-client timestamps (instantaneous or gradual?), then mitigation.
+ClickHouse just makes every step replayable over a longer window.

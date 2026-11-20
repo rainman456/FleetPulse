@@ -1,0 +1,8 @@
+# Real-AWS mode. Copy to aws.tfvars and edit; never commit aws.tfvars.
+# Credentials are NOT set here: Terraform and the app both use the standard
+# AWS credential chain (AWS_PROFILE, SSO, environment, or instance/task role).
+
+region         = "us-east-1"
+name_prefix    = "fleetpulse"
+tags           = {}
+use_localstack = false

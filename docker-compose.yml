@@ -8,12 +8,14 @@
 # stand this up.
 #
 # Services:
-#   - server:      ingestion + worker pool + /metrics (cmd/server)
-#   - simulator:   fake fleet client generator (cmd/simulator)
-#   - downstream:  Workflow Mapping stub dependency (cmd/downstream)
-#   - localstack:  local AWS emulator for the SQS/DynamoDB-backed pipeline
-#   - prometheus:  scrapes server:8080/metrics
-#   - grafana:     dashboards over the Prometheus datasource
+#   - server:              ingestion + worker pool + /metrics (cmd/server)
+#   - simulator:           fake fleet client generator (cmd/simulator)
+#   - downstream:          Workflow Mapping stub dependency (cmd/downstream)
+#   - clickhouse:          event store for the optional ClickHouse backend
+#   - clickhouse-migrate:  one-shot schema apply (scripts/ch-migrate.sh)
+#   - localstack:          local AWS emulator for the SQS/DynamoDB-backed pipeline
+#   - prometheus:          scrapes server:8080/metrics
+#   - grafana:             Prometheus + ClickHouse dashboards
 
 version: "3.9"
 
@@ -39,8 +41,20 @@ services:
       # AWS_REGION: "us-east-1"
       # AWS_ACCESS_KEY_ID: "test"
       # AWS_SECRET_ACCESS_KEY: "test"
+      # Optional ClickHouse backend: switch SINK_BACKEND to clickhouse (the
+      # ClickHouse store then also becomes the signals' state store).
+      FLEETPULSE_SINK_BACKEND: "memory"
+      FLEETPULSE_CLICKHOUSE_ADDR: "clickhouse:9000"
+      FLEETPULSE_CLICKHOUSE_DB: "fleetpulse"
+      FLEETPULSE_CLICKHOUSE_USER: "default"
+      # FLEETPULSE_CLICKHOUSE_PASSWORD: ""
     depends_on:
-      - downstream
+      downstream:
+        condition: service_started
+      clickhouse:
+        condition: service_healthy
+      clickhouse-migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
       interval: 10s
@@ -69,6 +83,43 @@ services:
       - "8090:8090"
     environment:
       FLEETPULSE_DOWNSTREAM_ADDR: ":8090"
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8.4.13
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - "clickhouse-data:/var/lib/clickhouse"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # One-shot schema apply. Exits 0 after 0001_events.sql and
+  # 0002_materialized_views.sql have run; `restart: "no"` keeps Compose from
+  # looping it. Safe to re-run (CREATE ... IF NOT EXISTS).
+  clickhouse-migrate:
+    image: clickhouse/clickhouse-server:24.8.4.13
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      CLICKHOUSE_HOST: "clickhouse"
+      CLICKHOUSE_PORT: "9000"
+      CLICKHOUSE_USER: "default"
+      CLICKHOUSE_PASSWORD: ""
+      MIGRATIONS_DIR: "/migrations"
+    volumes:
+      - "./migrations/clickhouse:/migrations:ro"
+      - "./scripts/ch-migrate.sh:/scripts/ch-migrate.sh:ro"
+    entrypoint: ["bash", "/scripts/ch-migrate.sh"]
+    restart: "no"
 
   localstack:
     image: localstack/localstack:3
@@ -103,10 +154,15 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: "admin"
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+      # Pinned ClickHouse datasource plugin. The trailing semicolon is the
+      # GF_INSTALL_PLUGINS list separator; a single entry is still valid.
+      GF_INSTALL_PLUGINS: "grafana-clickhouse-datasource 4.5.1;"
     volumes:
       - "./deploy/grafana/provisioning:/etc/grafana/provisioning:ro"
     depends_on:
       - prometheus
+      - clickhouse
 
 volumes:
   localstack-data:
+  clickhouse-data:

@@ -14,6 +14,18 @@
 //	AWS_ENDPOINT_URL=http://localhost:4566     (point AWS SDK calls at LocalStack)
 //	FLEETPULSE_DOWNSTREAM_URL=http://localhost:8090  (Workflow Mapping stub)
 //	FLEETPULSE_ADDR=:8080
+//
+// Optional ClickHouse backend (default: memory/off):
+//
+//	FLEETPULSE_SINK_BACKEND=memory|clickhouse       (default: memory)
+//	FLEETPULSE_CLICKHOUSE_ADDR=localhost:9000       (native protocol)
+//	FLEETPULSE_CLICKHOUSE_DB=fleetpulse
+//	FLEETPULSE_CLICKHOUSE_USER=default
+//	FLEETPULSE_CLICKHOUSE_PASSWORD=...
+//
+// With FLEETPULSE_SINK_BACKEND=clickhouse the ClickHouse store also becomes
+// the state.Store the signals computer reads, so heartbeat freshness is
+// computed from the same event rows the dashboard queries.
 package main
 
 import (
@@ -30,10 +42,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	fleetaws "github.com/mstone/fleetpulse/internal/aws"
+	"github.com/mstone/fleetpulse/internal/clickhouse"
 	"github.com/mstone/fleetpulse/internal/downstreamclient"
 	"github.com/mstone/fleetpulse/internal/ingest"
 	"github.com/mstone/fleetpulse/internal/queue"
 	"github.com/mstone/fleetpulse/internal/signals"
+	"github.com/mstone/fleetpulse/internal/sink"
 	"github.com/mstone/fleetpulse/internal/state"
 	"github.com/mstone/fleetpulse/internal/worker"
 )
@@ -68,11 +82,19 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
+	eventSink, stateStore, closeSink, err := buildSink(ctx, logger, stateStore)
+	if err != nil {
+		return err
+	}
+	defer closeSink()
+
 	computer := signals.NewComputer(stateStore, metrics, logger)
 	downstream := downstreamclient.New(downstreamURL, 3*time.Second)
 	enricher := worker.NewStubEnricher(downstream, computer, 0.03, 50*time.Millisecond)
 
-	pool := worker.NewPool(worker.DefaultConfig(), q, stateStore, computer, enricher, metrics, logger)
+	workerCfg := worker.DefaultConfig()
+	workerCfg.Sink = eventSink
+	pool := worker.NewPool(workerCfg, q, stateStore, computer, enricher, metrics, logger)
 
 	ingestHandler := ingest.NewHandler(publisherAdapter{q}, metrics, logger)
 
@@ -170,6 +192,43 @@ func buildStateStore(ctx context.Context, logger *slog.Logger) (state.Store, err
 		return fleetaws.NewDynamoDBStore(cfg, table, logger), nil
 	default:
 		return nil, errors.New("unknown FLEETPULSE_STATE_BACKEND: " + backend + " (want memory|dynamodb)")
+	}
+}
+
+// buildSink selects the optional event sink. The memory backend (default)
+// returns a no-op sink and leaves the state store untouched, so the original
+// in-memory/SQS + in-memory/DynamoDB paths behave exactly as before.
+//
+// The clickhouse backend returns a store that is both the sink and the
+// state.Store: the worker writes processed events into ClickHouse's event
+// log, and the signals computer's All/Get reads aggregate over those rows.
+func buildSink(ctx context.Context, logger *slog.Logger, store state.Store) (sink.Sink, state.Store, func(), error) {
+	backend := envString("FLEETPULSE_SINK_BACKEND", "memory")
+	noopClose := func() {}
+
+	switch backend {
+	case "memory":
+		return sink.NoopSink{}, store, noopClose, nil
+	case "clickhouse":
+		if stateBackend := envString("FLEETPULSE_STATE_BACKEND", "memory"); stateBackend != "memory" {
+			logger.Warn("FLEETPULSE_SINK_BACKEND=clickhouse overrides the configured state backend",
+				"state_backend", stateBackend)
+		}
+		chStore, err := clickhouse.New(ctx, clickhouse.ConfigFromEnv(), logger)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		cfg := clickhouse.ConfigFromEnv()
+		logger.Info("using ClickHouse event sink and state store",
+			"addr", cfg.Addr, "database", cfg.Database)
+		closeFn := func() {
+			if err := chStore.Close(); err != nil {
+				logger.Error("closing clickhouse sink", "error", err)
+			}
+		}
+		return chStore, chStore, closeFn, nil
+	default:
+		return nil, nil, nil, errors.New("unknown FLEETPULSE_SINK_BACKEND: " + backend + " (want memory|clickhouse)")
 	}
 }
 

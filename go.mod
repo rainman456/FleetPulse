@@ -7,8 +7,15 @@ go 1.24
 // require block below reflects plausible, recent-as-of-authoring versions
 // rather than a resolved, verified dependency graph. Running `go mod tidy`
 // is the first thing to do before this module will actually build.
+//
+// The ClickHouse driver was added by hand for the optional sink/state
+// backend; its transitive dependencies (ch-go, compress, otel, ...) are NOT
+// listed here because that list cannot be authored correctly without running
+// the resolver. `go mod tidy` must be run before building and the resulting
+// go.sum committed.
 
 require (
+	github.com/ClickHouse/clickhouse-go/v2 v2.30.0
 	github.com/aws/aws-sdk-go-v2 v1.32.6
 	github.com/aws/aws-sdk-go-v2/config v1.28.6
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.47

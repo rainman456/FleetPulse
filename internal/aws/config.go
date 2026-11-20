@@ -36,12 +36,18 @@ const DefaultLocalstackEndpoint = "http://localhost:4566"
 // AWS_REGION explicitly.
 const DefaultRegion = "us-east-1"
 
-// LoadLocalConfig builds an aws.Config suitable for pointing every service
-// client in this package at LocalStack. It reads AWS_ENDPOINT_URL (falling
-// back to DefaultLocalstackEndpoint) and, if no real credentials are
-// present in the environment, supplies LocalStack's conventional dummy
-// static credentials ("test"/"test") -- LocalStack doesn't validate these,
-// but the SDK refuses to make a request with no credential provider at all.
+// LoadLocalConfig builds the aws.Config used by every service client in this
+// package. Despite the historical name, it supports both targets:
+//
+//   - AWS_ENDPOINT_URL set (LocalStack): dummy static credentials
+//     ("test"/"test") are injected only when no credentials are present in
+//     the environment. LocalStack does not validate them, but the SDK
+//     refuses to sign a request with no credential provider at all.
+//   - AWS_ENDPOINT_URL unset (real AWS): no credentials are injected, so the
+//     standard AWS credential chain (environment, shared profile, SSO,
+//     instance/task role) is used exactly as the SDK intends.
+//
+// The region defaults to us-east-1 only when AWS_REGION is unset.
 func LoadLocalConfig(ctx context.Context) (aws.Config, error) {
 	region := os.Getenv("AWS_REGION")
 	if region == "" {
@@ -52,7 +58,7 @@ func LoadLocalConfig(ctx context.Context) (aws.Config, error) {
 		config.WithRegion(region),
 	}
 
-	if os.Getenv("AWS_ACCESS_KEY_ID") == "" {
+	if Endpoint() != "" && os.Getenv("AWS_ACCESS_KEY_ID") == "" {
 		opts = append(opts, config.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider("test", "test", ""),
 		))

@@ -23,6 +23,7 @@ import (
 	"github.com/mstone/fleetpulse/internal/ingest"
 	"github.com/mstone/fleetpulse/internal/queue"
 	"github.com/mstone/fleetpulse/internal/signals"
+	"github.com/mstone/fleetpulse/internal/sink"
 	"github.com/mstone/fleetpulse/internal/state"
 )
 
@@ -32,6 +33,11 @@ type Config struct {
 	ReceiveBatch    int
 	ReceiveWait     time.Duration
 	MetricsInterval time.Duration
+
+	// Sink, when set, receives every successfully processed event and every
+	// capture's mapping outcome. Nil means sink.NoopSink, which preserves the
+	// original memory-only behavior byte for byte.
+	Sink sink.Sink
 }
 
 func DefaultConfig() Config {
@@ -40,6 +46,7 @@ func DefaultConfig() Config {
 		ReceiveBatch:    10,
 		ReceiveWait:     2 * time.Second,
 		MetricsInterval: 2 * time.Second,
+		Sink:            sink.NoopSink{},
 	}
 }
 
@@ -50,6 +57,7 @@ type Pool struct {
 	store    state.Store
 	computer *signals.Computer
 	enricher Enricher
+	sink     sink.Sink
 	metrics  *signals.Metrics
 	logger   *slog.Logger
 }
@@ -58,7 +66,10 @@ func NewPool(cfg Config, q queue.Queue, store state.Store, computer *signals.Com
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Pool{cfg: cfg, q: q, store: store, computer: computer, enricher: enricher, metrics: metrics, logger: logger}
+	if cfg.Sink == nil {
+		cfg.Sink = sink.NoopSink{}
+	}
+	return &Pool{cfg: cfg, q: q, store: store, computer: computer, enricher: enricher, sink: cfg.Sink, metrics: metrics, logger: logger}
 }
 
 // Run blocks, running NumWorkers consumer goroutines plus a queue-metrics
@@ -147,20 +158,44 @@ func (p *Pool) process(ctx context.Context, workerID int, d queue.Delivery) {
 	_ = d.Nack(ctx)
 }
 
-// handleEvent updates client state and runs enrichment for one event. It
-// returns an error suitable for the retry/dead-letter decision in process().
+// handleEvent updates client state, runs enrichment, and (if a sink is
+// configured) persists the results for one event. It returns an error
+// suitable for the retry/dead-letter decision in process().
 func (p *Pool) handleEvent(ctx context.Context, evt ingest.Event) error {
 	isHeartbeat := evt.Type == ingest.EventHeartbeat
 	if err := p.store.Upsert(ctx, evt.ClientID, evt.Cohort, evt.Timestamp, isHeartbeat, evt.SessionID); err != nil {
 		return fmt.Errorf("state upsert: %w", err)
 	}
 
-	if err := p.enricher.Enrich(ctx, evt); err != nil {
-		return err
+	enrichErr := p.enricher.Enrich(ctx, evt)
+
+	if evt.Type == ingest.EventCapture {
+		// Record the mapping outcome even for failed calls: writing only
+		// successes would make the SQL-backed mapping signal look healthier
+		// than the in-process Prometheus gauge. Sink errors are logged, not
+		// returned, because observability data must not fail the event.
+		reason := ""
+		if enrichErr != nil {
+			reason = enrichErr.Error()
+		}
+		if err := p.sink.RecordMapping(ctx, enrichErr == nil, reason); err != nil {
+			p.logger.Warn("mapping result sink write failed", "client_id", evt.ClientID, "error", err)
+		}
+	}
+
+	if enrichErr != nil {
+		return enrichErr
 	}
 
 	if evt.Type == ingest.EventCapture {
 		p.computer.RecordCapture(evt)
+	}
+
+	if err := p.sink.Write(ctx, evt); err != nil {
+		// The event is already reflected in state and signals metadata, but a
+		// sink failure is transient by contract (buffered write/connection),
+		// so retry via the queue rather than acking a lost row.
+		return fmt.Errorf("event sink write: %w: %v", ErrTransient, err)
 	}
 	return nil
 }
